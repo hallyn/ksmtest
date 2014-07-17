@@ -51,6 +51,8 @@ void get_numanodes(void)
 	/* get number of cpuset.mems */
 	FILE *f = fopen("/sys/fs/cgroup/cpuset/cpuset.mems", "r");
 	char str[20];
+	int ret;
+
 	if (!f)
 		return;
 	ret = fscanf(f, "%d-%d", &mems_min, &mems_max);
@@ -62,10 +64,12 @@ void get_numanodes(void)
 void lock_numanodes(void)
 {
 	char path[1024];
+	FILE *f;
+
 	if (mems_max == 0)
 		return;
 	snprintf(path, 1024, "/sys/fs/cgroup/cpuset/ksmtest.%d", getpid());
-	mkdir_p(path);
+	mkdir(path, 0755);
 	snprintf(path, 1024, "/sys/fs/cgroup/cpuset/ksmtest.%d/tasks", getpid());
 	f = fopen(path, "w");
 	fprintf(f, "%d\n", getpid());
@@ -142,6 +146,33 @@ void verifycopy()
 void run_ksm_test(void)
 {
 	int ret;
+
+	lock_numanodes();
+	sz = mem * 1000000;
+	half = sz / 2;
+
+	m = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (m == MAP_FAILED) {
+		printf("Child %d; failed mmap!\n", getpid());
+		exit(1);
+	}
+
+	/*
+	 * Fill in pages
+	 * 0..half-1 is filled in with zeros
+	 * half .. sz is filled in with copies of filetomap
+	 */
+	memset(m, 0, half);
+	docopy(m, half, sz);
+
+	/* mark them mergable */
+	ret = madvise(m, sz, MADV_MERGEABLE);
+	if (ret) {
+		perror("madvise");
+		printf("Child %d: failed to mark pages mergable\n", getpid());
+		exit(1);
+	}
 
 
 	/* now loop, occasionally checking validity */
@@ -283,6 +314,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	get_numanodes();
 	if (!filetomap)
 		get_filetomap();
 	if (!filetomap) {
@@ -293,32 +325,6 @@ int main(int argc, char *argv[])
 
 	print_ksmenabled();
 	print_numaenabled();
-
-	sz = mem * 1000000;
-	half = sz / 2;
-
-	m = mmap(NULL, sz, PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_ANON, -1, 0);
-	if (m == MAP_FAILED) {
-		printf("Child %d; failed mmap!\n", getpid());
-		exit(1);
-	}
-
-	/*
-	 * Fill in pages
-	 * 0..half-1 is filled in with zeros
-	 * half .. sz is filled in with copies of filetomap
-	 */
-	memset(m, 0, half);
-	docopy(m, half, sz);
-
-	/* mark them mergable */
-	ret = madvise(m, sz, MADV_MERGEABLE);
-	if (ret) {
-		perror("madvise");
-		printf("Child %d: failed to mark pages mergable\n", getpid());
-		exit(1);
-	}
 
 	if (ntasks > 100) {
 		printf("are you sure you wanted %lu tasks?\n", ntasks);
