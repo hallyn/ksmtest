@@ -22,7 +22,7 @@ void usage(char *me)
 }
 
 int *pids;
-unsigned long mem = 100, ntasks = 5;
+unsigned long mem = 100, ntasks = 5, curtask;
 void stop_tests(int sig)
 {
 	int i, p;
@@ -41,8 +41,45 @@ char *filetomap;
 void *filecontents;
 size_t filesize;
 int ncopies;
+char *m;
+size_t half, sz;
 
-void docopy(void *m, size_t half, size_t sz)
+int mems_min, mems_max;
+
+void get_numanodes(void)
+{
+	/* get number of cpuset.mems */
+	FILE *f = fopen("/sys/fs/cgroup/cpuset/cpuset.mems", "r");
+	char str[20];
+	if (!f)
+		return;
+	ret = fscanf(f, "%d-%d", &mems_min, &mems_max);
+	fclose(f);
+	if (ret != 2)
+		mems_min = mems_max = 0;
+}
+
+void lock_numanodes(void)
+{
+	char path[1024];
+	if (mems_max == 0)
+		return;
+	snprintf(path, 1024, "/sys/fs/cgroup/cpuset/ksmtest.%d", getpid());
+	mkdir_p(path);
+	snprintf(path, 1024, "/sys/fs/cgroup/cpuset/ksmtest.%d/tasks", getpid());
+	f = fopen(path, "w");
+	fprintf(f, "%d\n", getpid());
+	fclose(f);
+	snprintf(path, 1024, "/sys/fs/cgroup/cpuset/ksmtest.%d/cpuset.mems", getpid());
+	f = fopen(path, "w");
+	if (curtask > (ntasks/2))
+		fprintf(f, "1\n");
+	else
+		fprintf(f, "0\n");
+	fclose(f);
+}
+
+void docopy()
 {
 	int i, fd;
 	struct stat st;
@@ -78,7 +115,7 @@ void docopy(void *m, size_t half, size_t sz)
 	printf("Child %d: sucessfully read %s\n", getpid(), filetomap);
 }
 
-void verifycopy(void *m, size_t half, size_t sz)
+void verifycopy()
 {
 	int i, fd;
 	struct stat st;
@@ -104,35 +141,8 @@ void verifycopy(void *m, size_t half, size_t sz)
  */
 void run_ksm_test(void)
 {
-	char *m;
-	size_t sz, half;
 	int ret;
 
-	sz = mem * 1000000;
-	half = sz / 2;
-
-	m = mmap(NULL, sz, PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_ANON, -1, 0);
-	if (m == MAP_FAILED) {
-		printf("Child %d; failed mmap!\n", getpid());
-		exit(1);
-	}
-
-	/*
-	 * Fill in pages
-	 * 0..half-1 is filled in with zeros
-	 * half .. sz is filled in with copies of filetomap
-	 */
-	memset(m, 0, half);
-	docopy(m, half, sz);
-
-	/* mark them mergable */
-	ret = madvise(m, sz, MADV_MERGEABLE);
-	if (ret) {
-		perror("madvise");
-		printf("Child %d: failed to mark pages mergable\n", getpid());
-		exit(1);
-	}
 
 	/* now loop, occasionally checking validity */
 	while (1) {
@@ -254,7 +264,7 @@ void get_filetomap(void)
 int main(int argc, char *argv[])
 {
 	char *me = argv[0];
-	int i, flags, opt;
+	int i, flags, opt, ret;
 
 	while ((opt = getopt(argc, argv, "n:m:")) != -1) {
 		switch (opt) {
@@ -284,6 +294,32 @@ int main(int argc, char *argv[])
 	print_ksmenabled();
 	print_numaenabled();
 
+	sz = mem * 1000000;
+	half = sz / 2;
+
+	m = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (m == MAP_FAILED) {
+		printf("Child %d; failed mmap!\n", getpid());
+		exit(1);
+	}
+
+	/*
+	 * Fill in pages
+	 * 0..half-1 is filled in with zeros
+	 * half .. sz is filled in with copies of filetomap
+	 */
+	memset(m, 0, half);
+	docopy(m, half, sz);
+
+	/* mark them mergable */
+	ret = madvise(m, sz, MADV_MERGEABLE);
+	if (ret) {
+		perror("madvise");
+		printf("Child %d: failed to mark pages mergable\n", getpid());
+		exit(1);
+	}
+
 	if (ntasks > 100) {
 		printf("are you sure you wanted %lu tasks?\n", ntasks);
 		printf("sleeping 20 seconds so you can ctrl-c\n");
@@ -293,6 +329,7 @@ int main(int argc, char *argv[])
 	if (!pids)
 		exit(1);
 	for (i = 0;  i < ntasks; i++) {
+		curtask = i;
 		pids[i] = fork();
 		if (pids[i] < 0) {
 			printf("Error forking\n");
