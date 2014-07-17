@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <fcntl.h>
+#include <stdbool.h>
 
 void usage(char *me)
 {
@@ -83,11 +84,13 @@ void lock_numanodes(void)
 	fclose(f);
 }
 
-void docopy()
+bool zerofirst = true;
+
+void readfile(void)
 {
-	int i, fd;
-	struct stat st;
+	int fd;
 	int ret;
+	struct stat st;
 
 	if ((fd = open(filetomap, O_RDONLY)) < 0) {
 		perror("open filetomap");
@@ -112,11 +115,31 @@ void docopy()
 		perror("read");
 		exit(1);
 	}
-
-	for (i = 0;  i < ncopies;  i++)
-		memcpy(m + (i * st.st_size), filecontents, st.st_size);
 	close(fd);
 	printf("Child %d: sucessfully read %s\n", getpid(), filetomap);
+}
+
+void copy_into_map()
+{
+	int i;
+	void *start;
+
+	if (zerofirst) {
+		memset(m, 0, half);
+		start = m+half;
+	} else {
+		start = m;
+		memset(m+half, 0, half);
+	}
+	zerofirst = !zerofirst;
+
+	if (!filecontents)
+		readfile();
+
+	for (i = 0;  i < ncopies;  i++) {
+		memcpy(start, filecontents, filesize);
+		start += filesize;
+	}
 }
 
 void verifycopy()
@@ -163,8 +186,7 @@ void run_ksm_test(void)
 	 * 0..half-1 is filled in with zeros
 	 * half .. sz is filled in with copies of filetomap
 	 */
-	memset(m, 0, half);
-	docopy(m, half, sz);
+	copy_into_map();
 
 	/* mark them mergable */
 	ret = madvise(m, sz, MADV_MERGEABLE);
@@ -187,6 +209,9 @@ void run_ksm_test(void)
 			}
 		}
 		verifycopy(m, half, sz);
+
+		// now flip-flop
+		copy_into_map();
 	}
 }
 
