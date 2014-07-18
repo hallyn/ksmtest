@@ -430,6 +430,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		char data[64];
 		struct timeb tp, tp2;
+		unsigned long time_elapsed;
 
 		print_ksm_shared();
 		verify_pids_alive();
@@ -445,8 +446,10 @@ int main(int argc, char *argv[])
 				perror("read");
 			}
 			ret = ftime(&tp2);
-			printf("Delay for child %d: %lu millisecs\n",
-				i, (tp2.time - tp.time) * 1000 + (tp2.millitm - tp.millitm));
+			time_elapsed = (tp2.time - tp.time) * 1000 + (tp2.millitm - tp.millitm);
+			if (time_elapsed > 5)
+				printf("Delay for child %d: %lu millisecs\n",
+					i, time_elapsed);
 		}
 		sleep(60);
 	}
