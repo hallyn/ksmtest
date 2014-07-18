@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/timeb.h>
 #include <dirent.h>
 #include <string.h>
 #include <fcntl.h>
@@ -159,6 +160,30 @@ void verifycopy()
 	close(fd);
 }
 
+int mypipe[2], mypipe2[2];
+struct pipestr {
+	int p[2];
+};
+struct pipestr *childpipe, *childpipe2;
+
+void watch_mypipe(void)
+{
+	fd_set rfds;
+	int ret, data[1024];
+
+	while (1) {
+		FD_ZERO(&rfds);
+		FD_SET(mypipe[0], &rfds);
+
+		ret = select(mypipe[0]+1, &rfds, NULL, NULL, NULL);
+		if (ret <= 0)
+			exit(0);
+		read(mypipe[0], data, 1);
+		memcpy(data, m, 1024);
+		write(mypipe2[1], data, 64);
+	}
+}
+
 /*
  * This is the actual test
  * mmap @mem M of anon private pages;  fill half of it with 0s,
@@ -180,6 +205,15 @@ void run_ksm_test(void)
 		printf("Child %d; failed mmap!\n", getpid());
 		exit(1);
 	}
+
+	/*
+	 * fire off a task to serve as the latency test
+	 */
+	int pid = fork();
+	if (pid < 0)
+		exit(1);
+	if (!pid)
+		watch_mypipe();
 
 	/*
 	 * Fill in pages
@@ -348,6 +382,22 @@ int main(int argc, char *argv[])
 		usage(me);
 	}
 
+	childpipe = malloc(ntasks * sizeof(struct pipestr));
+	childpipe2 = malloc(ntasks * sizeof(struct pipestr));
+	/* setup pipes for grandchildren */
+	for (i = 0; i < ntasks; i++) {
+		ret = pipe(childpipe[i].p);
+		if (ret) {
+			perror("pipe");
+			exit(1);
+		}
+		ret = pipe(childpipe2[i].p);
+		if (ret) {
+			perror("pipe");
+			exit(1);
+		}
+	}
+
 	print_ksmenabled();
 	print_numaenabled();
 
@@ -361,6 +411,9 @@ int main(int argc, char *argv[])
 		exit(1);
 	for (i = 0;  i < ntasks; i++) {
 		curtask = i;
+		mypipe[0] = childpipe[i].p[0];
+		mypipe2[1] = childpipe2[i].p[1];
+
 		pids[i] = fork();
 		if (pids[i] < 0) {
 			printf("Error forking\n");
@@ -375,8 +428,26 @@ int main(int argc, char *argv[])
 	signal(SIGINT, stop_tests);
 
 	while (1) {
+		char data[64];
+		struct timeb tp, tp2;
+
 		print_ksm_shared();
 		verify_pids_alive();
+		sleep(60);
+		for (i = 0;  i < ntasks;  i++) {
+			ret = ftime(&tp);
+			ret = write(childpipe[i].p[1], &i, 1);
+			if (ret != 1)
+				printf("WARNING: failed writing to childpipe %d\n", i);
+			ret = read(childpipe2[i].p[0], data, 64);
+			if (ret != 64) {
+				printf("WARNING: failed (%d) reading data from childpipe %d\n", ret, i);
+				perror("read");
+			}
+			ret = ftime(&tp2);
+			printf("Delay for child %d: %lu millisecs\n",
+				i, (tp2.time - tp.time) * 1000 + (tp2.millitm - tp.millitm));
+		}
 		sleep(60);
 	}
 }
